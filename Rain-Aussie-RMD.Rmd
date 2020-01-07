@@ -1,0 +1,508 @@
+---
+title: "Forecasting Rain in Australia"
+author: "Silvia ELaluf-Calderwood"
+date: "1/7/2020"
+output: 
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load the required libraries
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(RSNNS)) install.packages("RSNNS", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+if(!require(corrplot)) install.packages("corrplot", repos = "http://cran.us.r-project.org")
+
+# Function for encoding character columns as numeric
+EncodeVec <- function(v) {
+  v1 <- as.factor(v)
+  levels(v1) <- 1:length(levels(v1))
+  v1 <- as.numeric(v1)
+  return(v1)
+}
+
+## Introduction
+Inspired by current events in Australia and the environmental and ecological disaster the summer fires are creating in the island I have decided to investigate further how rain is forecast and predicted for the region.
+The dataset chosen for this project is _Rain in Australia_, which is a publicly available dataset found on the Kaggle website. See <https://www.kaggle.com/jsphyg/weather-dataset-rattle-package>. 
+The dataset contains daily measurements of various weather variables from weather stations at a number of locations throughout Australia, over a period of several years.  
+
+##Aim of the project
+The aim of the project is to fit a machine learning binary classification model to the data that will predict whether or not it will rain on the following day.  
+
+##Methodology
+The approach adopted was to fit several different classes of model to the data and select the one that gave the best performance. Accuracy was used as the measure of performance.  
+
+The models chosen were:  
+  
+Model 1: Generalized Linear Model
+Model 2: Linear Discriminant Analysis
+Model 3: Quadratic Discriminant Analysis
+Model 4: Multi-Layer Perceptron
+Model 5: k-Nearest Neighbors
+Model 6: Random Forest  
+  
+## Data preparationn
+The dataset was cleaned and then split into training and test sets, with the training set used to fit the models and the test set used to assess their performance.  
+
+## Caveats
+While all of the models chosen gave similar performance, the Random Forest model performed best, with an accuracy of 0.86. 
+Although this appears to be a good result, the model has a sensitivity of only 0.50, which means that it results in as many false negatives as true positives. 
+Hence if the goal of the model is to correctly predict days on which it will rain (as opposed to whether or not it will rain), the model performs about the same as tossing a coin (50-50 chances).  
+
+## Method
+The weather data was downloaded from the Kaggle site in CSV format and saved locally to a local computer. The CSV file was then loaded into a data frame in memory.  A copy of the dataset can be found (with other relevant files) at: https://github.com/silelf/Capstone-Final-Project
+
+
+```{r, echo=TRUE}
+# Read in the data from CSV file
+dfWeather <- read.csv(file="weatherAUS.csv", header=TRUE, stringsAsFactors=FALSE, fileEncoding="UTF-8-BOM")
+```
+  
+### Initial Exploratory Analysis: Structure and Dimensions
+
+The structure and dimensions of the data frame are shown below. This shows that the data contains _RainTomorrow_, the variable to be predicted by the model, along with other variables that can potentially be used as inputs to the model. It also shows that the data is a mixture of numeric and character variables, and that there are some missing values.  
+
+```{r}
+str(dfWeather)
+```  
+&nbsp;
+
+The locations at which measurements were recorded and the number of observations at each location are shown in the following table and bar chart.  
+
+```{r}
+# Create a table of locations and observations for each
+table(dfWeather$Location)
+num_loc <- length(unique(dfWeather$Location))
+paste("Number of locations:", num_loc)
+``` 
+
+``` {r}
+# Plot number of observations for each location
+ggplot(data = dfWeather, mapping = aes(x=Location)) +
+  geom_bar(fill = "darkgreen", width = 0.8) +
+  labs(title = "Number of Observations by Location") +
+  labs(x = "Location") +
+  labs(y = "# Observations") +
+  theme(plot.title = element_text(hjust = 0.5, size = 12)) +
+  theme(axis.text.x = element_text(angle = 90))
+```  
+  
+This shows that most of the locations have approximately 3000 observations.  
+  
+The date range of the measurements is a little over 10 years:  
+
+```{r}
+paste(min(dfWeather$Date), "to", max(dfWeather$Date))
+``` 
+
+### Checking for Missing Data
+
+Any observations containing missing data should be removed (or replaced with estimates) before attempting to fit any models. 
+Below is the procedure used I show the results of checking columns (variables) and rows (observations) for missing data.  
+  
+Checking columns first:  
+
+```{r}
+# Check columns, display in order of decreasing number of NAs
+sort(sapply(dfWeather, function(col) {sum(is.na(col))}), decreasing = TRUE)
+```
+
+These results show that there are four columns with more than 50000 missing values, substantially more than any of the other columns.  
+  
+Now check how many rows would remain if these four columns were removed and rows containing any missing values were omitted:  
+
+```{r}
+nrow(dfWeather[complete.cases(select(dfWeather, -(Evaporation:Sunshine), -(Cloud9am:Cloud3pm))),])
+```
+
+This represents about 77.5% of the observations, which will be regarded as sufficient for fitting and testing models.  
+  
+### Data Cleaning
+
+The operations involved in cleaning the data are:  
+
+1. removing the four columns identified above,
+2. omitting rows with any remaining missing data,
+3. replacing any character data with numeric values, and
+4. converting the column to be predicted, _RainTomorrow_, to a factor for classification purposes.  
+
+The _Date_ column is also to be removed, along with _RISK_MM_, which would give the model an unfair advantage. The reason for not including _RISK_MM_ as an input is best explained in the following quote from the creator of the dataset:  
+
+> _RISK-MM is the amount of rainfall in millimeters for the next day. It includes all forms of precipitation that reach the ground, such as rain, drizzle, hail and snow. And it was the column that was used to actually determine whether or not it rained to create the binary target. For example, if RISK-MM was greater than 0, then the RainTomorrow target variable is equal to Yes._ 
+
+```{r}
+# Remove the following columns:
+#   Date
+#   Evaporation
+#   Sunshine
+#   Cloud9am
+#   Cloud3pm
+#   RISK_MM
+dfWeather$Date <- NULL
+dfWeather$Evaporation <- NULL
+dfWeather$Sunshine <- NULL
+dfWeather$Cloud9am <- NULL
+dfWeather$Cloud3pm <- NULL
+dfWeather$RISK_MM <- NULL
+# Remove rows with missing data
+dfWeather <- dfWeather[complete.cases(dfWeather),]
+# Convert character columns to numeric
+dfWeather$WindGustDir <- EncodeVec(dfWeather$WindGustDir)
+dfWeather$WindDir9am <- EncodeVec(dfWeather$WindDir9am)
+dfWeather$WindDir3pm <- EncodeVec(dfWeather$WindDir3pm)
+dfWeather$RainToday<-str_replace_all(dfWeather$RainToday,"No","0")
+dfWeather$RainToday<-str_replace_all(dfWeather$RainToday,"Yes","1")
+dfWeather$RainTomorrow<-str_replace_all(dfWeather$RainTomorrow,"No","0")
+dfWeather$RainTomorrow<-str_replace_all(dfWeather$RainTomorrow,"Yes","1")
+dfWeather$RainToday <- as.numeric(dfWeather$RainToday)
+dfWeather$RainTomorrow <- as.factor(dfWeather$RainTomorrow)
+```
+&nbsp;
+
+After the above operations had been performed, the resulting dataset had the following dimensions:
+
+``` {r}
+# Show the dimensions of the resulting dataset
+paste("No. of rows (observations):", nrow(dfWeather))
+paste("No. of columns (variables):", ncol(dfWeather))
+```
+
+### Exploratory Analysis of Cleaned Data
+
+The structure of the cleaned data is shown below.  
+
+```{r}
+str(dfWeather)
+```
+
+_Location_ remains as a character variable, but it will not be used as a variable in fitting the models.  
+  
+\newpage
+
+The following table shows summary statistics for each of the variables in the cleaned dataset.
+
+```{r}
+summary(dfWeather)
+```
+
+&nbsp;
+
+Apart from _Location_ and the binary-valued _RainToday_ and _RainTomorrow_, most of the variables are fairly symetrically distributed, with their means and medians close in value. The exception is _Rainfall_, which is positively skewed, with a minimum of 0, a median of 0, and a maximum of 367.6.  
+
+No attempt was made to detect and remove outliers, although removing them from _Rainfall_ may have improved the performance of the models.  
+
+Samples of the frequency distributions are shown for two of the variables, _Temp3pm_ amd _Pressure3pm_, in the plots below.  
+
+```{r fig.width=6, fig.height=4, fig.align="center", echo=FALSE}
+# Plot histogram for Temp3pm
+ggplot(dfWeather, aes(Temp3pm)) +
+  geom_histogram(bins=16, fill="lightblue", color="black")
+# Plot histogram for Pressure3pm
+ggplot(dfWeather, aes(Pressure3pm)) +
+  geom_histogram(bins=16, fill="lightblue", color="black")
+```
+
+\newpage
+
+While the above plots show distributions over all locations, the following boxplots show how the distribution varies with location. The first plot shows how _Humidity3pm_ varies from location to location, in terms of both median value and spread. The second plot shows how _Rainfall_ differs from the other variables, with a median value at or near 0 for all locations but quite different ranges of values.  
+
+```{r fig.width=6, fig.height=4, fig.align="center", echo=FALSE}
+# Boxplot of Humidity3pm
+ggplot(dfWeather, aes(x=Location, y=Humidity3pm, fill=Location)) +
+  geom_boxplot(outlier.shape=19, outlier.size=0.5, outlier.alpha=0.2) +
+  labs(title="Relative Humidity at 3 pm by Location") +
+  labs(y="Humidity (%)") +
+  theme(plot.title=element_text(hjust=0.5)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  theme(legend.position="none")
+# Boxplot of Rainfall
+ggplot(dfWeather, aes(x=Location, y=Rainfall, fill=Location)) +
+  geom_boxplot(outlier.shape=19, outlier.size=0.5, outlier.alpha=0.2) +
+  labs(title="Daily Rainfall by Location") +
+  labs(y="Rainfall (mm)") +
+  theme(plot.title=element_text(hjust=0.5)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  theme(legend.position="none")
+```
+
+\newpage
+
+The following plot shows how many observations remain for each location.  
+  
+```{r}
+# Plot number of observations for each location
+ggplot(data = dfWeather, mapping = aes(x=Location)) +
+  geom_bar(fill = "darkgreen", width = 0.8) +
+  labs(title = "Number of Observations by Location") +
+  labs(x = "Location") +
+  labs(y = "# Observations") +
+  theme(plot.title = element_text(hjust = 0.5, size = 12)) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+
+It can be seen that there is now more variability in the number of observations across locations, due to each location having a different amount of missing data that has been removed.  
+
+It also appears that there are now fewer locations in the plot than there were originally:  
+
+```{r echo=FALSE}
+new_num_loc <- length(unique(dfWeather$Location))
+paste("Number of locations originally:", num_loc)
+paste("Number of locations remaining :", new_num_loc)
+```
+
+The reason that some locations are missing from the cleaned data is that these locations did not have any measurements for one or more of the variables.  
+
+\newpage
+
+As the model will be predicting whether or not it will rain, it is worth investigating how rainfall varies across locations, in terms of both average rainfall and days with rain.  
+
+The average rainfall for each location, based on the observations in the dataset, is shown in the plot below.  
+  
+```{r, echo=FALSE}
+# Calculate and plot average rainfall by location
+mean_rain <- dfWeather %>%
+  group_by(Location) %>%
+  summarize(mean = mean(Rainfall))
+mean_rain <- as.data.frame(mean_rain)
+ggplot(data = mean_rain, mapping = aes(x=Location, y=mean)) +
+  geom_col(fill = "blue", width = 0.8) +
+  labs(title = "Average Rainfall by Location") +
+  labs(x = "Location") +
+  labs(y = "Average Rainfall (mm)") +
+  theme(plot.title = element_text(hjust = 0.5, size = 12)) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+  
+It can be seen from the plot that places like Uluru (Ayres Rock) and Woomera have a very low average rainfall, as expected; while Cairns and Darwin have a much higher average rainfall, also as expected.  
+  
+The percentage of days with rain at these locations follows a similar trend, as revealed by the following table and plot.  
+
+Overall, the number of days without rain is much greater than the number of days with rain.  
+  
+```{r}
+# Summarize rainy days by location
+by_location <- group_by(dfWeather, Location)
+s1 <- summarize(by_location,
+                `Rainy Days`=sum(RainToday),
+                `Total Days`=n(),
+                `% Rainy Days`=round(sum(RainToday)/n()*100,1))
+print(as.data.frame(s1))
+paste("Total days in the dataset:", nrow(dfWeather))
+paste("Number of rainy days:     ", sum(dfWeather$RainToday))
+paste("Number of fine days:      ", nrow(dfWeather) - sum(dfWeather$RainToday))
+# Calculate and plot percentage of rainy days by location
+days_rain <- dfWeather %>%
+  group_by(Location) %>%
+  summarize(percent = 100*sum(RainToday)/n())
+days_rain <- as.data.frame(days_rain)
+ggplot(data = days_rain, mapping = aes(x=Location, y=percent)) +
+  geom_col(fill = "coral", width = 0.8) +
+  labs(title = "% Days with Rain by Location") +
+  labs(x = "Location") +
+  labs(y = "% Days") +
+  theme(plot.title = element_text(hjust = 0.5, size = 12)) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+&nbsp;
+
+```{r fig.width=6, fig.height=4, fig.align="center", echo=FALSE}
+# Calculate and plot percentage of rainy days overall
+s2 <- summarize(dfWeather,
+                Rain=round(sum(RainToday)/n()*100,1),
+                `No Rain`=round((n()-sum(RainToday))/n()*100,1))
+s2 <- as.data.frame(t(s2))
+names(s2) <- "Percent"
+ggplot(s2,aes(x=c("Rain", "No Rain"), y=Percent, color=Percent)) +
+  geom_col(fill=c("darkgreen", "Red"), width=0.5) +
+  geom_text(aes(label=Percent, vjust=-0.5)) +
+  ylim(0,100) +
+  labs(title = "% Days With and Without Rain - All Locations") +
+  labs(x = "") +
+  theme(plot.title=element_text(hjust=0.5)) +
+  theme(legend.position="none")
+```
+  
+\newpage
+  
+Check for correlations between variables:  
+```{r}
+# Calculate and plot correlations between variables
+M <- cor(dfWeather[,2:17])
+corrplot(M, method = "circle")
+```
+  
+  
+The plot shows that there is a strong positive correlation between all the temperature measurements on a given day at a given location. There is also strong positive correlation between the morning and afternoon atmospheric pressure measurements and a slightly weaker correlation between the morning and afternoon humidity measurements. A negative correlation exists between maximum temperature and humidity, and also between minimum temperature and atmospheric pressure.  
+
+These correlations suggest that it may be possible to reduce the dimensionality of the data. Principal component analysis indicated that eight principal components are required to explain 95% of the variation in the data - a reduction in the dimensionality of 50%. As the dimensionality is already fairly small and reducing it would probably result in lower prediction accuracy, this was not investigated any further.  
+
+```{r}
+# Perform principal component analysis and report results
+pca <- prcomp(dfWeather[,2:17])
+summary(pca)
+var_expl <- cumsum(pca$sdev^2/sum(pca$sdev^2))
+plot(var_expl,
+     main="Cumulative Proportion of Variance from Principal Components",
+     xlab="Components",
+     ylab="Proportion")
+```
+
+To see whether _RainToday_ is a good predictor of _RainTomorrow_, the correlation coefficient for the two variables was calculated:  
+  
+```{r}
+# Correlation between rain today and rain tomorrow
+r <- round(cor(dfWeather$RainToday, as.numeric(dfWeather$RainTomorrow)),2)
+paste("Correlation coefficient:", r)
+```
+
+This value indicates that rain today is a poor predictor of rain tomorrow.  
+
+&nbsp;
+
+From the above results, it appears that the dataset is now in a suitable form for fitting models.
+
+\newpage
+
+### Choosing and Fitting the Models
+
+The approach adopted was to choose six different classification models, fit a model based on each, and see which model gave the best performance.  
+
+The models chosen and the relevant R libraries are shown in the table below.  
+
+Model Type                      |caret Method| Library
+--------------------------------|------------|----------------
+Generalized Linear Model        | glm        | stats (system)
+Linear Discriminant Analysis    | lda        | MASS (system)
+Quadratic Discriminant Analysis | qda        | MASS (system)
+Multi-Layer Perceptron          | mlp        | RSNNS
+k-Nearest Neighbors             | knn        | class (system)
+Random Forest                   | rf         | randomForest
+  
+As the functions for training and prediction with these models have different syntax, the _caret_ package was chosen so that a uniform syntax could be used. This allows the training of all the models to be performed within a loop, or with a single call to the _lapply()_ function.  
+
+Prior to fitting the models, the data was standardized so that all values were in the range 0 to 1, and then split into training and test sets:  
+
+```{r}
+# Scale the data
+maxs <- apply(dfWeather[,2:16], 2, max)
+mins <- apply(dfWeather[,2:16], 2, min)
+dfScaled <- as.data.frame(scale(dfWeather[,2:16], center = mins, scale = maxs-mins))
+dfScaled <- cbind(dfScaled, dfWeather[,17:18])
+# Create datasets for training and testing
+set.seed(1)
+test_index <- createDataPartition(y=dfScaled$RainTomorrow, times=1, p=0.2, list=FALSE)
+dfTrain <- dfScaled[-test_index,]
+dfTest <- dfScaled[test_index,]
+rm(dfScaled)
+```
+
+The training and predicting could then be performed, and the accuracy determined for each of the models:  
+  
+```{r}
+# Train the models
+models <- c("glm", "lda", "qda", "mlp", "knn", "rf")
+t0 <- proc.time()
+fits <- lapply(models, function(model) {
+  caret::train(RainTomorrow ~ ., data = dfTrain, method = model)
+})
+t1 <- proc.time()
+names(fits) <- models
+# Perform prediction with each of the models
+y_hats <- sapply(fits, function(fit) {
+  y_hat <- predict(fit, dfTest)
+})
+t2 <- proc.time()
+# Calculate the accuracy of the models and format as a table
+accuracy <- colMeans(y_hats == dfTest$RainTomorrow)
+accuracy <- sort(round(accuracy, 4), decreasing = TRUE)
+accuracy <- cbind(names(accuracy), accuracy)
+row.names(accuracy) <- NULL
+acc_tbl <- kable(accuracy, col.names = c("Model", "Accuracy"))
+```
+  
+```{r}
+paste("Elapsed time for training:  ", round((t1-t0)[3], 0), "seconds")
+paste("Elapsed time for predicting:", round((t2-t1)[3], 0), "seconds")
+```
+  
+## Results  
+  
+All six models were fitted successfully, with accuracies in the range 0.83 to 0.86. The accuracies for each of the models, based on predictions for the test set, are tabulated below.  
+  
+```{r}
+acc_tbl
+```
+  
+The table shows that the Random Forest model gave marginally better performance than the other models. This model was chosen as the one to investigate further.  
+
+The Variable Importance table below shows which of the input varaibles have the greatest predictive power.  
+
+```{r echo=FALSE} 
+# Prepare a table of varaible importance, sorted into descending order
+imp <- as.data.frame(importance(fits[[6]]$finalModel))
+imp <- cbind(rownames(imp), imp)
+names(imp) <- c("Variable", "Importance")
+imp <- imp[order(-imp$Importance),]
+row.names(imp) <- NULL
+kable(imp)
+```
+  
+The table shows that relative humidity and atmospheric pressure on the day are the most important predictors of rain on the following day. It also shows that rain on the day is a poor predictor of rain on the following day, which is consistent with the low correlation between the two that was noted above.  
+
+Additional details of the random forest model fitted are presented below.  
+
+\newpage
+```{r echo=FALSE}
+print(fits[[6]])
+plot(fits[[6]])
+```
+
+Although an accuracy of approximately 0.86 was obtained for the test set predictions, the model's ability to predict rain is considerably lower. 
+This can be shown by examining the confusion matrix:  
+
+\newpage
+```{r echo=FALSE}
+y_hat <- as.factor(y_hats[,6])
+print(caret::confusionMatrix(y_hat, dfTest$RainTomorrow, positive="1"))
+```
+
+The confusion matrix shows that the number of false negatives (2451) slightly exceeds the number of true positives (2448). 
+This means that on days that it rained, the model predicted correctly only 50% of the time. 
+This is reflected in the sensitivity value of 0.4997, and can be seen in a visualization of the confusion matrix.  
+
+```{r fig.width=6, fig.height=4, fig.align="center", echo=FALSE}
+# Visualization of confusion matrix using boxplot with jitter
+y_hat <- as.factor(y_hats[,6])
+ggplot(mapping=aes(x=dfTest$RainTomorrow, y=fct_rev(y_hat), color=dfTest$RainTomorrow)) +
+  geom_boxplot(outlier.size=0.25) +
+  geom_jitter() + 
+  labs(title="Confusion Matrix Plot for 'Rain Tomorrow'") +
+  labs(x="Observed") +
+  labs(y="Predicted") +
+  theme(plot.title=element_text(hjust=0.5)) +
+  theme(legend.position="none")
+```
+
+In the graph the density of the dots in the two boxes on the right, representing true positives and false negatives, which is approximately equal.
+We can deduct then that on days that it rains the model is just as likely to have predicted that it will be fine.  
+  
+## Conclusions
+
+This project has demonstrated that it is possible to construct models to predict whether or not it will rain tomorrow, based on various weather measurements available today. Six different classification models were fitted, and all had a similar accuracy. 
+However, the Random Forest model had the highest accuracy, so it was examined in more detail.  
+
+The model identified relative humidity and atmospheric pressure on the previous day as the best predictors of whether or not it will rain, and rain on the previous day as the worst.  
+
+The results also highlighted the need - wish to refine the model accuracy -  to consider other model statistics, such as sensitivity and specificity, when assessing the performance of a model. 
+In this case, although the accuracy was fairly high at 0.86, the sensitivity was low, with a value of 0.50. Specificity was good, with a value of 0.96.  
+
+The high specificity value means that the false positive rate is low. The low sensitivity value means that the false negative rate is relatively high, so that on days that it rains, there is a 50-50 chance that the model predicted correctly. This is in contrast with the 86% chance that the model makes a correct prediction on average.  
